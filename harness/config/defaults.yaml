@@ -1,0 +1,34 @@
+# Harness 默认配置
+# 用户可通过 YAML 或 JSON 文件覆盖
+
+name: "harness"
+max_steps: 50
+permission_level: "SANDBOX"
+
+llm:
+  provider: "openai"
+  model: "gpt-4o"
+  api_key: null
+  base_url: null
+  max_tokens: 4096
+  temperature: 0.7
+
+memory:
+  working_max_tokens: 128000
+  episodic_persist_dir: ".harness/memory/episodic"
+  semantic_enabled: false
+
+recovery:
+  checkpoint_dir: ".harness/checkpoints"
+  checkpoint_interval: 3
+  checkpoint_ttl_days: 7
+
+plugins:
+  auto_discover: true
+  builtin_enabled: true
+  extra_paths: []
+
+eval:
+  enabled: false
+  suites_dir: ".harness/eval/suites"
+  results_dir: ".harness/eval/results"
