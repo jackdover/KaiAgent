@@ -12,6 +12,7 @@ from harness.core.memory import (
     WorkingMemory,
     Summarizer,
 )
+from harness.core.permissions import PermissionDenied, PermissionPolicy, ResourceType
 from harness.core.recovery import RecoveryManager
 from harness.core.types import (
     Action,
@@ -35,6 +36,16 @@ class AgentLoop:
         INIT → IDLE → THINKING → ACTING → OBSERVING → (→THINKING/→DONE)
     """
 
+    # 工具名称到资源类型的映射
+    _TOOL_RESOURCE_MAP: dict[str, ResourceType] = {
+        "read_file": ResourceType.FILE_READ,
+        "list_files": ResourceType.FILE_READ,
+        "write_file": ResourceType.FILE_WRITE,
+        "execute_command": ResourceType.EXEC_COMMAND,
+        "http_get": ResourceType.NETWORK_REQUEST,
+        "http_post": ResourceType.NETWORK_REQUEST,
+    }
+
     def __init__(
         self,
         hooks: HookRegistry,
@@ -43,6 +54,7 @@ class AgentLoop:
         recovery: RecoveryManager,
         summarizer: Summarizer | None = None,
         llm_provider: Any | None = None,
+        permissions: PermissionPolicy | None = None,
         plugin_registry: Any | None = None,
         max_steps: int = 50,
     ):
@@ -52,6 +64,7 @@ class AgentLoop:
         self.recovery = recovery
         self.summarizer = summarizer or Summarizer()
         self.llm = llm_provider
+        self.permissions = permissions or PermissionPolicy()
         self.plugin_registry = plugin_registry
         self.max_steps = max_steps
         self._state: SessionState | None = None
@@ -171,6 +184,7 @@ class AgentLoop:
         # --- OBSERVE ---
         self._state.status = AgentStatus.OBSERVING
         step.observation = await self._observe(step.action)
+        await self.hooks.emit("on_after_action", step)
 
         # 完成 step
         step.completed_at = datetime.now()
@@ -303,7 +317,12 @@ class AgentLoop:
         """
         results = []
         for tc in tool_calls:
+            await self.hooks.emit("on_pre_tool_use", tc)
             result = await self._execute_single_tool(tc)
+            if result.get("result", "").startswith("Error"):
+                await self.hooks.emit("on_post_tool_use_failure", result)
+            else:
+                await self.hooks.emit("on_post_tool_use", result)
             results.append(result)
 
         return Observation(
@@ -311,8 +330,35 @@ class AgentLoop:
             tool_results=results,
         )
 
+    def _get_tool_resource(self, tc: ToolCall) -> str:
+        """从工具调用参数中提取要检查的资源标识符。"""
+        resource_type = self._TOOL_RESOURCE_MAP.get(tc.name)
+        if not resource_type:
+            return tc.name
+        if resource_type == ResourceType.EXEC_COMMAND:
+            return tc.arguments.get("command", "")
+        if resource_type in (ResourceType.FILE_READ, ResourceType.FILE_WRITE):
+            return tc.arguments.get("path", "")
+        if resource_type == ResourceType.NETWORK_REQUEST:
+            return tc.arguments.get("url", "")
+        return tc.name
+
     async def _execute_single_tool(self, tc: ToolCall) -> dict[str, Any]:
         """执行单个工具调用。"""
+        # 权限检查 (使用工具级权限检查)
+        resource_type = self._TOOL_RESOURCE_MAP.get(tc.name)
+        if resource_type:
+            resource = self._get_tool_resource(tc)
+            try:
+                self.permissions.check_tool(tc.name, resource)
+            except PermissionDenied as e:
+                return {
+                    "tool_call_id": tc.tool_call_id,
+                    "name": tc.name,
+                    "arguments": tc.arguments,
+                    "result": str(e),
+                }
+
         # 有 PluginRegistry 时通过 Plugin 执行
         if self.plugin_registry:
             for plugin in self.plugin_registry._plugins.values():
@@ -327,6 +373,8 @@ class AgentLoop:
                             "arguments": tc.arguments,
                             "result": plugin_result,
                         }
+                    except PermissionDenied:
+                        raise
                     except Exception as e:
                         return {
                             "tool_call_id": tc.tool_call_id,
@@ -357,6 +405,9 @@ class AgentLoop:
 
     async def _maybe_compress(self) -> None:
         """在必要时压缩记忆。"""
+        # 发射 PreCompact Hook (用于压缩前保存状态)
+        await self.hooks.emit("on_pre_compact", self._state)
+
         # 检查 working memory 是否需要压缩
         if await self.working_memory.needs_compression():
             await self.working_memory.compress()
@@ -369,6 +420,9 @@ class AgentLoop:
                 content=f"[Episode Summary]: {summary.content}",
             )
             await self.working_memory.add(summary_msg)
+
+        # 发射 PostCompact Hook
+        await self.hooks.emit("on_post_compact", self._state)
 
     def _build_system_prompt(self, task: str) -> str:
         """构建 system prompt。"""

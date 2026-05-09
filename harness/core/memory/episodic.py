@@ -122,6 +122,22 @@ class EpisodicMemory(BaseMemory):
                     "completed_at": (
                         s.completed_at.isoformat() if s.completed_at else None
                     ),
+                    "action": (
+                        {
+                            "type": s.action.type.value,
+                            "content": s.action.content,
+                        }
+                        if s.action
+                        else None
+                    ),
+                    "observation": (
+                        {
+                            "content": s.observation.content,
+                            "error": s.observation.error,
+                        }
+                        if s.observation
+                        else None
+                    ),
                 }
                 for s in self._steps
             ],
@@ -129,16 +145,49 @@ class EpisodicMemory(BaseMemory):
         file_path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
 
     async def load(self, session_id: str) -> bool:
-        """从文件加载情景记忆。"""
+        """从文件加载情景记忆。
+
+        恢复保存的全部 steps (含 thought, action, observation)。
+        """
         file_path = Path(self.config.persist_dir) / f"{session_id}.json"
         if not file_path.exists():
             return False
 
+        from harness.core.types import Action, Observation
+
         data = json.loads(file_path.read_text())
         self._session_id = data["session_id"]
-        self._summaries = [Summary(content=s["content"]) for s in data["summaries"]]
-        # Steps 反序列化较为复杂，此处仅恢复元数据
+        self._summaries = [Summary(content=s["content"]) for s in data.get("summaries", [])]
         self._steps = []
+        for s_data in data.get("steps", []):
+            step = Step(
+                id=s_data["id"],
+                thought=s_data.get("thought"),
+                started_at=(
+                    datetime.fromisoformat(s_data["started_at"])
+                    if s_data.get("started_at")
+                    else datetime.now()
+                ),
+                completed_at=(
+                    datetime.fromisoformat(s_data["completed_at"])
+                    if s_data.get("completed_at")
+                    else None
+                ),
+            )
+            # 恢复 Action
+            if s_data.get("action"):
+                from harness.core.types import ActionType
+                step.action = Action(
+                    type=ActionType(s_data["action"].get("type", "text_response")),
+                    content=s_data["action"].get("content"),
+                )
+            # 恢复 Observation
+            if s_data.get("observation"):
+                step.observation = Observation(
+                    content=s_data["observation"].get("content", ""),
+                    error=s_data["observation"].get("error"),
+                )
+            self._steps.append(step)
         return True
 
     def _generate_episode_summary(self, steps: list[Step]) -> str:

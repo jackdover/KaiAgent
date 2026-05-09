@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from harness.core.types import Action, AgentStatus, SessionState, Step
+from harness.core.types import Action, ActionType, AgentStatus, SessionState, Step
 
 
 class CheckpointError(Exception):
@@ -106,7 +106,10 @@ class RecoveryManager:
                 session_id=data["session_id"],
                 state=state,
                 pending_actions=[
-                    Action(type=a["type"], content=a.get("content"))
+                    Action(
+                        type=ActionType(a["type"]),
+                        content=a.get("content"),
+                    )
                     for a in data.get("pending_actions", [])
                 ],
                 metadata=data.get("metadata", {}),
@@ -244,7 +247,7 @@ class RecoveryManager:
             )
             if s_data.get("action"):
                 step.action = Action(
-                    type=s_data["action"]["type"],
+                    type=ActionType(s_data["action"]["type"]),
                     content=s_data["action"].get("content"),
                 )
             steps.append(step)

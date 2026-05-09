@@ -21,6 +21,7 @@ from harness.plugins import PluginRegistry
 from harness.plugins.builtins.file import FilePlugin
 from harness.plugins.builtins.shell import ShellPlugin
 from harness.plugins.builtins.web import WebPlugin
+from harness.plugins.builtins.llm_provider import LLMProviderPlugin
 from harness.skills import SkillRegistry, SkillContext
 
 
@@ -112,22 +113,20 @@ class Harness:
         # 6. 初始化摘要器
         summarizer = Summarizer()
 
-        # 7. 初始化 Agent Loop (依赖 Plugin 系统)
+        # 7. 初始化 Agent Loop (依赖 Plugin 系统 + 权限系统)
         self._loop = AgentLoop(
             hooks=self._hooks,
             working_memory=self._working_memory,
             episodic_memory=self._episodic_memory,
             recovery=self._recovery,
             summarizer=summarizer,
+            permissions=self._permissions,
             plugin_registry=self._plugin_registry,
             max_steps=self.config.max_steps,
         )
 
         # 8. 初始化 Skill 系统
         self._skill_registry = SkillRegistry()
-
-        self._started = True
-        await self._hooks.emit("on_harness_start", self)
 
         self._started = True
         await self._hooks.emit("on_harness_start", self)
@@ -173,10 +172,16 @@ class Harness:
             for event, handlers in skill_hooks.items():
                 for handler in handlers:
                     self._hooks.register(event, handler, priority=HookPriority.SKILL)
+            # 传递工具到 Agent Loop
+            tools = skill_context.tools
+            self._loop.set_tools(tools)
         else:
             # 无匹配 Skill 时使用所有 Plugin 的工具
             tools = self._plugin_registry.collect_tools()
             self._loop.set_tools(tools)
+
+        # 8. 注册 LLM Provider Plugin (如果有 LLM 配置)
+        self._register_llm_plugin()
 
         return await self._loop.execute(task, session_id=session_id)
 
@@ -223,47 +228,15 @@ class Harness:
             for handler in handlers:
                 self._hooks.register(event, handler, priority=HookPriority.PLUGIN)
 
-    def _register_tool_exec_hook(self) -> None:
-        """注册 Tool 执行 Hook — 将 Plugin 的 execute_tool 方法桥接到 Agent Loop。"""
-        async def tool_exec_hook(ctx: HookContext) -> HookContext | None:
-            step = ctx.data
-            if not step or not step.action:
-                return ctx
-            if not step.action.tool_calls:
-                return ctx
-
-            # 为每个 tool_call 执行 Plugin 工具
-            results = []
-            for tc in step.action.tool_calls:
-                # 在所有 Plugin 中查找能处理此工具的
-                for plugin in self._plugin_registry._plugins.values():
-                    if hasattr(plugin, 'execute_tool'):
-                        result = await plugin.execute_tool(tc.name, tc.arguments)
-                        results.append({
-                            "tool_call_id": tc.tool_call_id,
-                            "name": tc.name,
-                            "result": result,
-                        })
-                        break
-                else:
-                    results.append({
-                        "tool_call_id": tc.tool_call_id,
-                        "name": tc.name,
-                        "result": f"Error: No plugin found for tool '{tc.name}'",
-                    })
-
-            # 将结果写回 step
-            if step.observation:
-                step.observation.tool_results = results
-                step.observation.content = (
-                    f"Executed {len(results)} tool call(s)"
-                )
-
-            return ctx
-
-        self._hooks.register(
-            "on_after_action", tool_exec_hook, priority=HookPriority.SYSTEM
-        )
+    def _register_llm_plugin(self) -> None:
+        """注册 LLM Provider Plugin 并连接到 Loop。"""
+        llm_config = self.config.llm
+        if not llm_config or not llm_config.provider:
+            return
+        # 创建 LLM Provider Plugin 并注册
+        llm_plugin = LLMProviderPlugin()
+        self._plugin_registry.register(llm_plugin)
+        self._loop.llm = llm_plugin
 
     def _build_permissions(self) -> PermissionPolicy:
         """根据配置构建权限策略。"""

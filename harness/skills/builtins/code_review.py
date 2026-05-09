@@ -34,7 +34,7 @@ class CodeReviewSkill(Skill):
             "- Style: consistency with language conventions"
         )
 
-    async def get_tools(self, context: SkillContext) -> list[ToolDefinition]:
+    def get_tools(self, context: SkillContext) -> list[ToolDefinition]:
         """返回代码审查需要的工具。"""
         if context.plugin_registry:
             return context.plugin_registry.collect_tools()

@@ -69,7 +69,8 @@ async def test_skill_registration_and_matching():
     # 匹配关键词
     matched = registry.match_skills("请帮我 review 这段代码")
     assert len(matched) == 1
-    assert matched[0].metadata.name == "code_review"
+    score, skill, name = matched[0]
+    assert name == "code_review"  # tuple format: (score, skill|None, name)
 
     # 不匹配
     matched = registry.match_skills("今天天气怎么样")

@@ -119,13 +119,21 @@ async def run_task(args: argparse.Namespace) -> None:
     from harness.config.schema import HarnessConfig
     from harness.feedback.integration import FeedbackIntegrator
 
-    config = HarnessConfig.default()
-    config.max_steps = args.steps
+    if args.config:
+        config = HarnessConfig.from_file(args.config)
+        # CLI --steps 覆盖配置文件
+        if args.steps != 50:
+            config.max_steps = args.steps
+    else:
+        config = HarnessConfig.default()
+        config.max_steps = args.steps
 
     if args.verbose:
         print(f"Starting Harness...")
         print(f"Task: {args.task}")
-        print(f"Max steps: {args.steps}")
+        print(f"Max steps: {config.max_steps}")
+        if args.config:
+            print(f"Config: {args.config}")
         print()
 
     h = Harness(config=config)

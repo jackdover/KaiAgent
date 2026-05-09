@@ -1,4 +1,4 @@
-"""工作记忆 — 管理 LLM Context Window，支持滑动窗口+摘要压缩。"""
+"""工作记忆 — 管理 LLM Context Window，支持级联压缩管线。"""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from harness.core.memory.base import BaseMemory, Summary
+from harness.core.memory.compressor import Compressor
 from harness.core.types import LLMMessage
 
 
@@ -16,16 +17,22 @@ class WorkingMemoryConfig:
     compression_ratio: float = 0.7  # 触发压缩的阈值 (达到 max_tokens * ratio)
     reserved_tokens: int = 2000     # 为输出保留的 token 数
     keep_recent_steps: int = 5      # 压缩时保留的最近完整 step 数
+    aggressive_compress: bool = False  # 是否启用激进压缩 (LLM 摘要)
 
 
 class WorkingMemory(BaseMemory):
     """工作记忆 — 管理当前 step 的 LLM 上下文。"""
 
-    def __init__(self, config: WorkingMemoryConfig | None = None):
+    def __init__(
+        self,
+        config: WorkingMemoryConfig | None = None,
+        compressor: Compressor | None = None,
+    ):
         self.config = config or WorkingMemoryConfig()
         self._system: LLMMessage | None = None
         self._messages: list[LLMMessage] = []
         self._summary: Summary | None = None
+        self._compressor = compressor or Compressor()
 
     async def add(self, message: LLMMessage) -> None:
         self._messages.append(message)
@@ -61,30 +68,54 @@ class WorkingMemory(BaseMemory):
         return tokens >= threshold * self.config.compression_ratio
 
     async def compress(self) -> Summary:
-        """压缩早期内容：保留最近 K 步，对之前的内容做摘要。"""
+        """压缩早期内容：使用级联压缩管线。
+
+        1. 尝试级联压缩 (Tool Budget → Snip → Microcompact → Collapse → Summary)
+        2. 保留最近 K 步的完整内容
+        3. 对之前的内容做摘要
+        """
         if len(self._messages) <= self.config.keep_recent_steps:
             return Summary(content="")
 
         # 分离 system prompt
         msg_list = list(self._messages)
 
-        # 需要被摘要的消息 = 总消息数 - 保留的最近步数
+        # 需要被压缩的消息 = 总消息数 - 保留的最近步数
         compress_count = len(msg_list) - self.config.keep_recent_steps
         to_compress = msg_list[:compress_count]
         to_keep = msg_list[compress_count:]
 
-        # 生成摘要
-        raw_text = "\n".join(
-            f"[{m.role}]: {m.content or ''}" for m in to_compress if m.content
-        )
-        compressed_text = (
-            f"Previous {compress_count} messages summarized. "
-            f"Key points: {raw_text[:500]}..."
+        # 使用级联压缩管线
+        compressed_msgs = await self._compressor.compress_messages(
+            to_compress,
+            aggressive=self.config.aggressive_compress,
         )
 
+        # 如果压缩后有摘要消息，提取它
+        summary_content = ""
+        if compressed_msgs:
+            parts = []
+            for m in compressed_msgs:
+                if m.content:
+                    parts.append(f"[{m.role}]: {m.content[:300]}")
+            summary_content = "; ".join(parts)
+        else:
+            raw_text = "\n".join(
+                f"[{m.role}]: {m.content or ''}" for m in to_compress if m.content
+            )
+            summary_content = (
+                f"Previous {compress_count} messages summarized. "
+                f"Key points: {raw_text[:500]}..."
+            )
+
         summary = Summary(
-            content=compressed_text,
-            token_count=self._estimate_tokens(compressed_text),
+            content=summary_content,
+            token_count=self._estimate_tokens(summary_content),
+            metadata={
+                "compressed_count": compress_count,
+                "kept_count": len(to_keep),
+                "compressor_success": len(compressed_msgs) > 0,
+            },
         )
 
         self._summary = summary
