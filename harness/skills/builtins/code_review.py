@@ -31,7 +31,8 @@ class CodeReviewSkill(Skill):
             "- Security: injection, XSS, auth issues\n"
             "- Maintainability: naming, complexity, duplication\n"
             "- Performance: inefficient algorithms, N+1 queries, memory leaks\n"
-            "- Style: consistency with language conventions"
+            "- Style: consistency with language conventions\n"
+            "5. When your review is complete and all feedback has been provided, emit a FINISH action to signal completion."
         )
 
     def get_tools(self, context: SkillContext) -> list[ToolDefinition]:

@@ -434,6 +434,7 @@ class AgentLoop:
             "2. ACT: Execute a tool call or provide a response",
             "3. OBSERVE: See the results and decide next step",
             "",
+            "When the task is complete, you MUST emit a FINISH action.",
             "Available tools will be provided to you.",
             f"\nTask: {task}",
         ]
